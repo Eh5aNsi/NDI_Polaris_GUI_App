@@ -1,5 +1,5 @@
 """
- **Polaris Vega XT GUI App**
+ **Polaris Vega XT GUI App for Cadaver Experiments**
 
 An advanced GUI for a Rigid Registration pipeline, plus real-time external tracking 
 (Polaris Vega & Aurora), and a 3D scene showing the phantom/CT.
@@ -8,7 +8,7 @@ An advanced GUI for a Rigid Registration pipeline, plus real-time external track
 Author: [Ehsan Nasiri]
 contact:[Ehsan.Nasiri@dartmouth.edu]
 
-Date: May 09, 2025 ---> Modified in Aug. 8th, 2025
+Date: Aug. 8th, 2025
 
 """
 
@@ -43,7 +43,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QFileDialog, QRadioButton, 
     QButtonGroup, QListWidget,
     QMessageBox,QGroupBox,QDialog,
-    QScrollArea,QSizePolicy
+    QScrollArea,QSizePolicy,QCheckBox  
 )
 from PyQt5.QtGui import ( QIntValidator,QIcon,
 QPixmap, QFont
@@ -67,7 +67,7 @@ TIP_CALIB = BASE_DIR / 'tips'         # all the .tip file for tools should be he
 PHANTOM_DIR = MODELS_DIR / 'TORS'     # all the .stl or .vtk adn .fcsv etc realted to the phantom model should be here
 
 
-# create them on startup  ----> **Please put the .rom, .tip etc files within the following created folder first!! **
+# create them on startup  ----> ** put the .rom, .tip etc files within the following created folder first!! **
 for d in (ROM_DIR, MODELS_DIR, CALIB_DIR,TIP_CALIB, PHANTOM_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -174,7 +174,7 @@ def pivot_calib_lsq(input_csv, std_dev_threshold=3.0, output_tip=None):
         with open(output_tip,'x') as f:
             f.write(','.join(f"{c:+.4f}" for c in tip_local))
             
-    print(f"[pivot_calib_lsq] tip = {tip_local}   |   RMSE = {rmse:.3f} mm") # th rmse for the tip calib.
+    print(f"[pivot_calib_lsq] tip = {tip_local}   |   RMSE = {rmse:.3f} mm") # th RMSE for the tip calib.
 
     return tip_local, rmse
 
@@ -343,15 +343,21 @@ class PolarisGUI(QMainWindow):
         #NDI tracker clock (Polaris counter derived from PTP, 60 Hz)
         # Auto-rate detection with a temporary default  
         self.DEFAULT_POLARIS_HZ   = 400.0   # sensible for Vega XT
-        self.POLARIS_HZ           = None    # locked/settled rate (once known)
+        self.POLARIS_HZ           = None    # locked/settled rate
         self.ndi_frame0           = None    # baseline frame #
         self.host_t0              = None    # host time at baseline
         self._rate_est            = None    # running estimate 
         self._rate_samples        = 0
         self._using_default_rate  = True
         #-----------------------------------------------------------------------------------
-
-
+        # --- HyperDeck config ---
+        self.HD_LEFT_IP   = '192.168.10.50'
+        self.HD_RIGHT_IP  = '192.168.10.60'
+        self.HD_PORT      = 9993
+        self.HD_TIMEOUT_S = 2.0
+        self.hd_left_sock  = None
+        self.hd_right_sock = None
+        self.video_running = False   # track current recording state
 
    
     def _init_ui(self):
@@ -514,6 +520,13 @@ class PolarisGUI(QMainWindow):
         of_layout.addWidget(self.outputfileclearbutton)
         ctrl_l.addLayout(of_layout)
 
+        ###
+        # Single Cap append option 
+        self.cbAppendSingles = QCheckBox("Single Cap → append to this file (keep name)")
+        self.cbAppendSingles.setChecked(False)
+        ctrl_l.addWidget(self.cbAppendSingles)
+        ###
+
         # Capture note
         ctrl_l.addWidget(QLabel('Capture Note:'))
         self.capturenote = QLineEdit()
@@ -662,9 +675,17 @@ class PolarisGUI(QMainWindow):
         
         
     def _open_csv_if_needed(self):
+        """
+        Open CSV handle if not open.
+        - If 'Single Cap → append...' is checked and file exists, open in append.
+        - Otherwise open in write mode.
+        - Write header only if file is new/empty.
+        """
         if self.fidDataOut is not None:
             return
-        out = self.outputfile.text().strip()
+
+        # Resolve desired filename
+        out = (self.outputFilePath or self.outputfile.text().strip() or "").strip()
         if not out:
             existing = glob.glob('trial*.csv')
             idxs = [int(f[5:-4]) for f in existing if f[5:-4].isdigit()]
@@ -672,19 +693,110 @@ class PolarisGUI(QMainWindow):
         if not out.lower().endswith('.csv'):
             out += '.csv'
 
-        # Optional: roll index if an indexed name already exists
-        m = re.match(r'(.*?)(\d{3})\.csv$', out)
-        if m and Path(out).exists():
-            base, num = m.groups()
-            out = f"{base}{int(num)+1:03d}.csv"
+        # Decide append vs write
+        append_mode = bool(self.cbAppendSingles.isChecked() and Path(out).exists())
 
         self.outputFilePath = out
         self.updateOutputFilePath()
 
-        self.fidDataOut = open(self.outputFilePath, 'w')
-        self.fidDataOut.write(
-            'polaris_time,unix_time,tool_id,q0,q1,q2,q3,tx,ty,tz,tx_tip,ty_tip,tz_tip,reg_err,capture_note\n'
-        )
+        mode = 'a' if append_mode else 'w'
+        self.fidDataOut = open(self.outputFilePath, mode, encoding='utf-8')
+
+        # header only if new/empty
+        need_header = True
+        if append_mode:
+            try:
+                need_header = (Path(self.outputFilePath).stat().st_size == 0)
+            except Exception:
+                need_header = True
+
+        if need_header:
+            self.fidDataOut.write(
+                'polaris_time,unix_time,tool_id,q0,q1,q2,q3,tx,ty,tz,'
+                'tx_tip,ty_tip,tz_tip,reg_err,capture_note\n'
+            )
+
+    ###
+    def _hd_send(self, sock: socket.socket, cmd: str, expect_ok=True) -> str:
+        """
+        Send one HyperDeck command and read one line reply.
+        Protocol wants CRLF over TCP. Expect replies like '200 ok'.
+        """
+        if sock is None:
+            return ""
+        msg = (cmd + "\r\n").encode("ascii")
+        sock.sendall(msg)
+        sock.settimeout(self.HD_TIMEOUT_S)
+        data = sock.recv(1024)  # single line is fine
+        resp = data.decode("ascii", errors="ignore").strip()
+        if expect_ok and not resp.lower().startswith("200"):
+            self.log(f"[HyperDeck] Unexpected reply to '{cmd}': {resp}")
+        else:
+            self.log(f"[HyperDeck] {cmd} -> {resp}")
+        return resp
+
+    def _hd_open_one(self, ip: str) -> socket.socket:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(self.HD_TIMEOUT_S)
+        s.connect((ip, self.HD_PORT))
+        # quick software ping
+        self._hd_send(s, "ping")
+        # enable remote + select slot 1
+        self._hd_send(s, "remote: enable: true")
+        self._hd_send(s, "slot select: slot id: 1")
+        return s
+
+    def _video_start(self):
+        """
+        Open both HyperDeck sockets and start recording on each.
+        Only runs once per session; safe to call if already recording.
+        """
+        if self.video_running:
+            return
+        # Optional network check...
+        try:
+            self.hd_left_sock  = self._hd_open_one(self.HD_LEFT_IP)
+        except Exception as e:
+            self.log(f"[HyperDeck] Left open failed: {e}")
+            self.hd_left_sock = None
+        try:
+            self.hd_right_sock = self._hd_open_one(self.HD_RIGHT_IP)
+        except Exception as e:
+            self.log(f"[HyperDeck] Right open failed: {e}")
+            self.hd_right_sock = None
+
+        # start recording (any side that is connected)
+        if self.hd_left_sock:  self._hd_send(self.hd_left_sock,  "record")
+        if self.hd_right_sock: self._hd_send(self.hd_right_sock, "record")
+
+        self.video_running = bool(self.hd_left_sock or self.hd_right_sock)
+        if self.video_running:
+            self.log("[HyperDeck] Recording started.")
+        else:
+            self.log("[HyperDeck] No recorders reachable; video not started.")
+
+    def _video_stop(self):
+        """
+        Stop recording and close sockets.
+        """
+        if self.hd_left_sock:
+            try: self._hd_send(self.hd_left_sock, "stop")
+            except: pass
+            try: self.hd_left_sock.close()
+            except: pass
+            self.hd_left_sock = None
+
+        if self.hd_right_sock:
+            try: self._hd_send(self.hd_right_sock, "stop")
+            except: pass
+            try: self.hd_right_sock.close()
+            except: pass
+            self.hd_right_sock = None
+
+        if self.video_running:
+            self.log("[HyperDeck] Recording stopped.")
+        self.video_running = False
+        ###
 
 
     def _init_plots(self):
@@ -1271,26 +1383,34 @@ class PolarisGUI(QMainWindow):
         for btn in ['Disconnect','Start Cap','Start Cap + Video','Preview']:
             self.buttons[btn].setEnabled(True)
 
-        # close the one-off CSV so next Single Cap gets a fresh file
-        if getattr(self, 'fidDataOut', None):
-            try:
-                self.fidDataOut.flush()
-                self.fidDataOut.close()
-            finally:
-                self.fidDataOut = None
-         # >>> record the just-finished file BEfore rolling <<<
-        self.lastFinishedCSV = self.outputFilePath
-
-        # roll suggested name again for the *next* single capture
-        if self.outputFilePath:
-            self.outputFilePath = self._next_trial_name(self.outputFilePath)
-            self.updateOutputFilePath()
+        # finish handling depending on append mode
+        if self.cbAppendSingles.isChecked():
+            # Append mode: close but DO NOT roll; next Single Cap will append to same file
+            if getattr(self, 'fidDataOut', None):
+                try:
+                    self.fidDataOut.flush()
+                    self.fidDataOut.close()
+                finally:
+                    self.fidDataOut = None
+            # expose the file to the Tip Cal button if want to use it mid-session
+            self.lastFinishedCSV = self.outputFilePath
+        else:
+            # Original behavior (one file per Single Cap)
+            if getattr(self, 'fidDataOut', None):
+                try:
+                    self.fidDataOut.flush()
+                    self.fidDataOut.close()
+                finally:
+                    self.fidDataOut = None
+            self.lastFinishedCSV = self.outputFilePath
+            if self.outputFilePath:
+                self.outputFilePath = self._next_trial_name(self.outputFilePath)
+                self.updateOutputFilePath()
 
         self._update_capture_note_enable()
         self._set_tip_button_enabled()
 
 
-    
     def on_startcap(self):
         self.ndi_frame0 = None
         self.host_t0 = None
@@ -1310,6 +1430,15 @@ class PolarisGUI(QMainWindow):
         self.buttons['Stop'].setEnabled(True)
 
         self.endTrackingFlag = False
+        ###HyperDecks if requested by "Start Cap + Video"
+        if self.send_video_cmd:
+            self.send_video_cmd = False  # one-shot
+            try:
+                self._video_start()
+            except Exception as e:
+                self.log(f"[HyperDeck] Start failed: {e}")
+                ###
+
         self.captureTimer.start(0)
     
   
@@ -1343,6 +1472,14 @@ class PolarisGUI(QMainWindow):
         self.buttons['Stop'].setEnabled(False)
         for btn in ['Single Cap','Start Cap','Start Cap + Video','Disconnect','Preview']:
             self.buttons[btn].setEnabled(True)
+
+        ### Stop HyperDecks if they are recording
+        if self.video_running:
+            try:
+                self._video_stop()
+            except Exception as e:
+                self.log(f"[HyperDeck] Stop failed: {e}")
+
 
         self._update_capture_note_enable()
         self._set_tip_button_enabled()
@@ -1481,7 +1618,7 @@ class PolarisGUI(QMainWindow):
             p = Path(path)
             if p.exists():
                 try:
-                    # Require at least header + 1 data line (cheap check).
+                    # Require at least header + 1 data line 
                     with open(p, 'r', encoding='utf-8', errors='ignore') as f:
                         # Read two lines max
                         has_two = sum(1 for _, __ in zip(f, range(2))) == 2
@@ -2038,6 +2175,5 @@ if __name__ == '__main__':
     gui.show()
     sys.exit(app.exec_())
     
-#################################################################################################################################
+#########################################################EN2025################################################################
 ###############################################################################################################################
-
