@@ -2,13 +2,15 @@
  **Polaris Vega XT GUI App for Cadaver Experiments**
 
 An advanced GUI for a Rigid Registration pipeline, plus real-time external tracking 
-(Polaris Vega & Aurora), and a 3D scene showing the phantom/CT.
+(Polaris Vega), and a 3D scene showing the phantom/CT.
+
+-New feather: Works with Polaris Timing....
 
 
 Author: [Ehsan Nasiri]
 contact:[Ehsan.Nasiri@dartmouth.edu]
 
-Date: Aug. 8th, 2025
+Date: Aug. 8th, 2025---> updated Oct. 16
 
 """
 
@@ -510,7 +512,7 @@ class PolarisGUI(QMainWindow):
         # Output file
         ctrl_l.addWidget(QLabel('Output File:'))
         self.outputfile = QLineEdit('trial001.csv')
-        self.outputfile.textChanged.connect(self.on_outputfile_text_changed)  # added for manual chnanging name
+        self.outputfile.textChanged.connect(self.on_outputfile_text_changed)  #  for manual chnanging name
         ctrl_l.addWidget(self.outputfile)
         
         of_layout = QHBoxLayout()
@@ -559,7 +561,7 @@ class PolarisGUI(QMainWindow):
         status_grid = QGridLayout()
         labels = list('ABCDEFGHI')
         
-        self.status_labels = {}  ## added newly
+        self.status_labels = {}  ## added newly......
 
         for idx, lab in enumerate(labels):
             lbl_widget = QLabel(lab)
@@ -568,7 +570,7 @@ class PolarisGUI(QMainWindow):
             
             status_grid.addWidget(lbl_widget, idx//3, idx%3)
             # self.status_labels = {lab: lbl_widget}
-            self.status_labels[lab] = lbl_widget ## added newly
+            self.status_labels[lab] = lbl_widget ## added newly.....
             
         ctrl_l.addLayout(status_grid)
         
@@ -2016,7 +2018,7 @@ class PolarisGUI(QMainWindow):
             port_handles, timestamps, frame_numbers, tracking, quality = \
                 self.ndiTracker.get_frame()
                 
-            #--------------------------newly added for polaris_time ------------------------------
+            #--------------------------  for polaris_time ------------------------------
             # use only frames with valid transforms
             valid_fns = [int(fn) for fn, T in zip(frame_numbers, tracking) if not np.isnan(T).any()]
 
@@ -2063,7 +2065,7 @@ class PolarisGUI(QMainWindow):
             rot = Rotation.from_matrix(T[:3, :3])
             trans = T[:3, 3]
             qx, qy, qz, qw = rot.as_quat()
-            q0, q1, q2, q3 = qw, qx, qy, qz # added, q3=qz
+            q0, q1, q2, q3 = qw, qx, qy, qz # added, q3=qz...
 
             
             tip_xyz = trans + quat_rot([q0, q1, q2, q3], self.tipCalData[idx])
@@ -2075,6 +2077,7 @@ class PolarisGUI(QMainWindow):
             if not self.previewFlag:
                 if self.fidDataOut is None:
                     self._open_csv_if_needed()
+                    
                 # self.fidDataOut.write(
                 #     f"{timestamps[idx]:.4f},{time.time():.2f},"
                 #     f"{chr(self.BASE_TOOL_CHAR+tnum)},"
@@ -2109,10 +2112,25 @@ class PolarisGUI(QMainWindow):
             color_map = {0: 'green', 1: 'yellow', 2: 'red'}
             col = color_map[status]
 
-            # 3) update 2D letter color & position
+            # # 3) update 2D letter color & position
+            # for plane in ('front','top','side'):
+            #     h = self.pointHandles[idx][plane]
+            #     # same positioning 
+            #     if plane == 'front':
+            #         pos = (trans[1], -trans[0])
+            #     elif plane == 'top':
+            #         pos = (-trans[2], -trans[1])
+            #     else:
+            #         pos = (-trans[2], -trans[0])
+            #     h.set_position(pos)
+            #     h.set_color(col)
+
+            # # 4) update LED grid
+            # self.setToolStatusIndicator(tnum, status)   #uncomments newlly--- June 2025 
+            
+            handles = self.pointHandles[tnum - 1] # ----> newly added.....
             for plane in ('front','top','side'):
-                h = self.pointHandles[idx][plane]
-                # same positioning 
+                h = handles[plane]
                 if plane == 'front':
                     pos = (trans[1], -trans[0])
                 elif plane == 'top':
@@ -2122,8 +2140,7 @@ class PolarisGUI(QMainWindow):
                 h.set_position(pos)
                 h.set_color(col)
 
-            # 4) update LED grid
-            self.setToolStatusIndicator(tnum, status)   #uncomments newlly--- June 2025
+            self.setToolStatusIndicator(tnum, status)
        
         # redraw
         self.canvas_front.draw()
@@ -2177,3 +2194,4 @@ if __name__ == '__main__':
     
 #########################################################EN2025################################################################
 ###############################################################################################################################
+
