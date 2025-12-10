@@ -10,7 +10,7 @@ An advanced GUI for a Rigid Registration pipeline, plus real-time external track
 Author: [Ehsan Nasiri]
 contact:[Ehsan.Nasiri@dartmouth.edu]
 
-Date: Aug. 8th, 2025---> updated Oct. 16
+Date: Aug. 8th, 2025---> updated Dec. 10
 
 """
 
@@ -360,6 +360,8 @@ class PolarisGUI(QMainWindow):
         self.hd_left_sock  = None
         self.hd_right_sock = None
         self.video_running = False   # track current recording state
+        # Pause/resume state for continuous capture
+        self._paused = False
 
    
     def _init_ui(self):
@@ -524,7 +526,7 @@ class PolarisGUI(QMainWindow):
 
         ###
         # Single Cap append option 
-        self.cbAppendSingles = QCheckBox("Single Cap → append to this file (keep name)")
+        self.cbAppendSingles = QCheckBox("Single Cap → append to this file")
         self.cbAppendSingles.setChecked(False)
         ctrl_l.addWidget(self.cbAppendSingles)
         ###
@@ -548,7 +550,7 @@ class PolarisGUI(QMainWindow):
         # Control buttons
         btn_names = [
             'Connect', 'Disconnect', 'Single Cap', 'Start Cap', 'Start Cap + Video',
-            'Stop', 'Preview', 'Calibrate Tip', 'Generate ROM', 'Register Phantom'
+            'Stop', 'Pause', 'Preview', 'Calibrate Tip', 'Generate ROM', 'Register Phantom'
         ]
         
         self.buttons = {}
@@ -636,6 +638,7 @@ class PolarisGUI(QMainWindow):
         self.buttons['Start Cap'].clicked.connect(self.on_startcap)
         self.buttons['Start Cap + Video'].clicked.connect(self.on_startcapvid)
         self.buttons['Stop'].clicked.connect(self.on_stopcap)
+        self.buttons['Pause'].clicked.connect(self.on_pausecap)  # NEW..
         self.buttons['Preview'].clicked.connect(self.on_preview)
         self.buttons['Calibrate Tip'].clicked.connect(self.on_tipcalibrate)
         self.buttons['Generate ROM'].clicked.connect(self.on_generateROM)
@@ -1321,6 +1324,11 @@ class PolarisGUI(QMainWindow):
             
         self.lastFinishedCSV = ''
         self._set_tip_button_enabled()   
+        
+        # Initially we are idle: no capture, so Stop/Pause must be disabled
+        self.buttons['Stop'].setEnabled(False)
+        self.buttons['Pause'].setEnabled(False)
+        self._paused = False
 
     
     def on_disconnect(self):
@@ -1354,6 +1362,7 @@ class PolarisGUI(QMainWindow):
         
         self.lastFinishedCSV = ''
         self._set_tip_button_enabled()
+        self._paused = False
    
     
     def on_singlecap(self):
@@ -1364,7 +1373,6 @@ class PolarisGUI(QMainWindow):
         self._rate_samples = 0
         self._using_default_rate = True
 
-
         self.previewFlag = False
         self.captureTimer.stop()
         self.endTrackingFlag = True
@@ -1373,8 +1381,10 @@ class PolarisGUI(QMainWindow):
         self._open_csv_if_needed()  # opens current outputfile 
 
         self.capturenote.setEnabled(False)
-        for btn in ['Disconnect','Start Cap','Start Cap + Video','Preview']:
+        for btn in ['Disconnect','Start Cap','Start Cap + Video','Preview','Pause']:
             self.buttons[btn].setEnabled(False)
+            
+        self.buttons['Stop'].setEnabled(False)
 
         status = self._captureData()
         if status != 0:
@@ -1384,6 +1394,9 @@ class PolarisGUI(QMainWindow):
 
         for btn in ['Disconnect','Start Cap','Start Cap + Video','Preview']:
             self.buttons[btn].setEnabled(True)
+            
+        self.buttons['Stop'].setEnabled(False)
+        self.buttons['Pause'].setEnabled(False)
 
         # finish handling depending on append mode
         if self.cbAppendSingles.isChecked():
@@ -1414,40 +1427,101 @@ class PolarisGUI(QMainWindow):
 
 
     def on_startcap(self):
-        self.ndi_frame0 = None
-        self.host_t0 = None
-        self.POLARIS_HZ = None
-        self._rate_est = None
-        self._rate_samples = 0
-        self._using_default_rate = True
+        # self.ndi_frame0 = None
+        # self.host_t0 = None
+        # self.POLARIS_HZ = None
+        # self._rate_est = None
+        # self._rate_samples = 0
+        # self._using_default_rate = True
 
+
+        # # disable buttons & note during streaming
+        # self.previewFlag = False              # record mode
+        # self._open_csv_if_needed()            # open & write header only now
+
+        # self.capturenote.setEnabled(False)
+        # for btn in ['Single Cap','Start Cap','Start Cap + Video','Disconnect','Preview']:
+        #     self.buttons[btn].setEnabled(False)
+        # self.buttons['Stop'].setEnabled(True)
+
+        # self.endTrackingFlag = False
+        # ###HyperDecks if requested by "Start Cap + Video"
+        # if self.send_video_cmd:
+        #     self.send_video_cmd = False  # one-shot
+        #     try:
+        #         self._video_start()
+        #     except Exception as e:
+        #         self.log(f"[HyperDeck] Start failed: {e}")
+        #         ###
+
+        # self.captureTimer.start(0)
+        
+        # Reset timing only for a fresh run, not for pause→resume
+        if not self._paused:
+            self.ndi_frame0 = None
+            self.host_t0 = None
+            self.POLARIS_HZ = None
+            self._rate_est = None
+            self._rate_samples = 0
+            self._using_default_rate = True
 
         # disable buttons & note during streaming
         self.previewFlag = False              # record mode
-        self._open_csv_if_needed()            # open & write header only now
+        self._open_csv_if_needed()            # open & write header only now..
 
         self.capturenote.setEnabled(False)
         for btn in ['Single Cap','Start Cap','Start Cap + Video','Disconnect','Preview']:
             self.buttons[btn].setEnabled(False)
         self.buttons['Stop'].setEnabled(True)
+        self.buttons['Pause'].setEnabled(True)   # allow pausing
 
         self.endTrackingFlag = False
-        ###HyperDecks if requested by "Start Cap + Video"
+        ### HyperDecks if requested by "Start Cap + Video"
         if self.send_video_cmd:
             self.send_video_cmd = False  # one-shot
             try:
                 self._video_start()
             except Exception as e:
                 self.log(f"[HyperDeck] Start failed: {e}")
-                ###
-
+        ###
         self.captureTimer.start(0)
-    
+        self._paused = False
+        # tip calibration stays disabled while file is open
+        self._set_tip_button_enabled()
+        
+    def on_pausecap(self):
+            """
+            Pause continuous streaming without closing the CSV.
+            can edit the capture note and then hit Start Cap again
+            to continue writing into the SAME file.
+            """
+            if self.previewFlag:
+                # In preview mode we don’t have an open CSV anyway.
+                self.endTrackingFlag = True
+                self.captureTimer.stop()
+            else:
+                self.endTrackingFlag = True
+                self.captureTimer.stop()
+
+            self._paused = True
+
+            # Allow user to change the capture note between segments
+            self.capturenote.setEnabled(True)
+            self._update_capture_note_enable()
+
+            # Re-enable controls needed while paused
+            self.buttons['Stop'].setEnabled(False)
+            self.buttons['Pause'].setEnabled(False)
+            for btn in ['Single Cap', 'Start Cap', 'Start Cap + Video', 'Disconnect', 'Preview']:
+                self.buttons[btn].setEnabled(True)
+
+            self._set_tip_button_enabled()
+
   
     def on_startcapvid(self):
     #   self.previewFlag = True
     #   self.on_startcap()
-        self.previewFlag = False              # MUST be False so we record...
+        self.previewFlag = False              # MUST be False so record...
         self.send_video_cmd = True            
         self.on_startcap()
         
@@ -1455,6 +1529,7 @@ class PolarisGUI(QMainWindow):
     def on_stopcap(self):
         self.endTrackingFlag = True
         self.captureTimer.stop()  # <- stop the timer
+        self._paused = False
 
         # close CSV if we were recording
         if getattr(self, 'fidDataOut', None):
@@ -1472,6 +1547,7 @@ class PolarisGUI(QMainWindow):
             self.updateOutputFilePath()
 
         self.buttons['Stop'].setEnabled(False)
+        self.buttons['Pause'].setEnabled(False)
         for btn in ['Single Cap','Start Cap','Start Cap + Video','Disconnect','Preview']:
             self.buttons[btn].setEnabled(True)
 
@@ -1541,6 +1617,7 @@ class PolarisGUI(QMainWindow):
         for btn in ['Single Cap','Start Cap','Start Cap + Video','Disconnect','Preview']:
             self.buttons[btn].setEnabled(False)
         self.buttons['Stop'].setEnabled(True)
+        self.buttons['Pause'].setEnabled(False)
 
         self.endTrackingFlag = False
         self.captureTimer.start(0)
@@ -1634,7 +1711,6 @@ class PolarisGUI(QMainWindow):
         # Optional: show the file that will be used for calibration in the box
         if ok:
             self.outputfile.setText(os.path.basename(path))
-
 
 
     def on_outputfile_clear(self):
@@ -1761,7 +1837,7 @@ class PolarisGUI(QMainWindow):
             f.write(struct.pack('<f', y))
             f.write(struct.pack('<f', z))
             
-        # write zeros for normals (we’ll assume face normal = +Z)
+        # write zeros for normals ( assume face normal = +Z)
         for _ in range(numMarkers):
             f.write(struct.pack('<fff', 0.0, 0.0, 1.0))
         
@@ -2194,4 +2270,3 @@ if __name__ == '__main__':
     
 #########################################################EN2025################################################################
 ###############################################################################################################################
-
